@@ -1,7 +1,7 @@
 from machine import UART
 from time import sleep
 import re
-
+import gc
 
 class IllegalArgumentException(Exception):
     pass
@@ -15,7 +15,30 @@ class CmeError(Exception):
 class CmsError(Exception):
     pass
 
+
+class HttpResponse:
+    
+    def __init__(self, content=None, status_code=None, content_len=None, method=None):
+        self.content=content
+        self.content_len=content_len
+        self.status_code=status_code
+        self.method=method
+    
+    def text(self):
+        return self.content.decode('utf-8')
+
+
+
 class Sim7000:
+    
+    HTTPS_METHODS = {
+        'GET': 1,
+        'PUT': 2,
+        'POST': 3,
+        'PATCH': 4,
+        'HEAD': 5
+    }
+    
     def __init__(self, device, baudrate, rx_pin=16, tx_pin=17):
         self.uart = UART(device, baudrate, rx=rx_pin, tx=tx_pin, bits=8, parity=None, stop=1, timeout=1000)
         sleep(2)
@@ -27,8 +50,11 @@ class Sim7000:
         cmd_prefix=re.match(r'^[A-Z]+', cmd).group(0)
         self.uart.write('AT+' + cmd + '\r')
         while True:
-            l = self.uart.readline().decode('utf-8').rstrip()
-            print('->' + l)
+            buf = self.uart.readline()
+            if not buf:
+                continue
+            l = buf.decode('utf-8').rstrip()
+            print('<---' + l)
             if l.startswith(cmd) or not l:
                 continue
             if l.startswith('OK'):
@@ -58,7 +84,7 @@ class Sim7000:
                 continue
             
             l = buf.decode('utf-8').rstrip()
-            print('->' + l)
+            print('<---' + l)
             if l.startswith('+' + cmd):
                 return self._parse_result(l)
         
@@ -89,11 +115,11 @@ class Sim7000:
                 if not buf:
                     return False
                 l = buf.decode('utf-8').rstrip()
-                print('->' + l)
+                print('<---' + l)
                 if l.startswith('OK'):
                     return True
-                if not l:
-                    return False
+                #if not l:
+                #    return False
         except:
             return False
         
@@ -133,13 +159,11 @@ class Sim7000:
         self.cmd('CFUN=6')
     
     def http_get(self, url):
+        ''' Deprecated - use http() below ''' 
         try:
             print(self.cmd('HTTPTERM'))
         except:
             print('exception clearing HTTP state')
-        
-        #if url.startswith('https:'):
-        #    self.cmd('CSSLCFG="sslversion",1,3')
         
         self.cmd('HTTPINIT')
         self.cmd('HTTPPARA="CID",1')
@@ -148,6 +172,99 @@ class Sim7000:
         #self.cmd('HTTPSTATUS=?')
         method, status, response_len = self.wait_for('HTTPACTION')
         #self.cmd('HTTPSTATUS=?')
-        self.cmd('HTTPREAD')
+        self.cmd('HTTPREAD=0,{}'.format(response_len))
         self.cmd('HTTPTERM')
     
+    
+    def download_cert(self):
+        f=open('cacerts/Amazon_Root_CA_1.crt', 'r')
+        cert = f.read()
+        size = len(cert)
+        f.close()
+        self.cmd('CFSINIT')
+        self.uart.write('AT+CFSWFILE=3,"Amazon_Root_CA_1.crt",0,{},1000\r'.format(size)) # 3-file system, 1000 - timeout (ms)
+        print("download command sent, waiting for confirm")
+        while True:
+            buf = self.uart.readline()
+            if not buf:
+                print('#', end='')
+                continue
+            
+            l = buf.decode('utf-8').rstrip()
+            print('<---' + l)
+            if l.startswith('DOWNLOAD'):
+                break
+
+        print("Sending file...")
+        bytes_written = self.uart.write(cert)
+        print("Wrote {} bytes".format(bytes_written))
+        self.uart.write('\r')
+        self.cmd('CFSTERM')
+        self.cmd('CSSLCFG="convert",2,"Amazon_Root_CA_1.crt"')
+        
+    
+    def _get_host(self, url):
+        return url.split('/')[2]
+
+    def http(self, url, method='GET', body=None, headers={}):
+        
+        if self.query('SHSTATE?')[0] != 0: # Terminate previous connection if open
+            self.cmd('SHDISC')
+        
+        if url.startswith('https:'):
+            self.cmd('CSSLCFG="sslversion",1,3')
+            #self.cmd('SHSSL=1,"Amazon_Root_CA_1.crt"')
+            self.cmd('SHSSL=1,""') # !!! Need to set empty cert as #1 in order to skip cert validation!!
+
+        host = self._get_host(url)
+        # Mandatory params:
+        schema = url.split(':')[0]
+        self.cmd('SHCONF="URL","{}://{}"'.format(schema, host))
+        self.cmd('SHCONF="BODYLEN",1024')
+        self.cmd('SHCONF="HEADERLEN",350')
+        
+        if body:
+            self.cmd('SHBOD="{}",{}'.format(body.replace('"', r'\"'), len(body)))
+
+        self.cmd('SHCONN')
+        for header_name, header_val in headers.items():
+            self.cmd('SHAHEAD="{}","{}"'.format(header_name, header_val))
+
+        method_code = Sim7000.HTTPS_METHODS[method.upper()]
+
+        query_string = url.split(host)[1]
+        if not query_string:
+            query_string = '/'
+            
+        self.cmd('SHREQ="{}",{}'.format(query_string, method_code))
+        method, status, response_len = self.wait_for('SHREQ')
+        
+        resp = HttpResponse(content_len=response_len, content=b'', method=method, status_code=status)
+        if status <= 599:
+            while len(resp.content) < response_len:
+                self.cmd('SHREAD={},{}'.format(len(resp.content), response_len-len(resp.content)))            
+                while True:
+                    gc.collect()
+                    buf = self.uart.readline()
+                    if not buf:
+                        break
+                    line = buf.decode('utf-8').rstrip()
+                    if not line.startswith('+SHREAD:'):
+                        print('<---{}'.format(line))
+                        continue
+                    bytes_to_read = self._parse_result(line)[0]
+                    print("---------------reading {}b -----------".format(bytes_to_read))
+                    buf = self.uart.read(bytes_to_read)
+                    resp.content += buf
+                    print("--------------- {} of {}b read so far -----------".format(len(buf), len(resp.content)))
+                    if len(buf) < bytes_to_read:
+                        break
+
+                    if len(resp.content) >= response_len:
+                        print("--------------- A total of {}b were read ------------".format(len(resp.content)))
+                        break
+                                
+        self.cmd('SHDISC')
+        gc.collect()
+        return resp
+
