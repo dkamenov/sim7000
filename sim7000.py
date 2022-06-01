@@ -2,6 +2,7 @@ from machine import UART
 from time import sleep
 import re
 import gc
+import json
 
 class IllegalArgumentException(Exception):
     pass
@@ -26,6 +27,9 @@ class HttpResponse:
     
     def text(self):
         return self.content.decode('utf-8')
+    
+    def json(self):
+        return json.loads(self.content.decode('utf-8'))
 
 
 
@@ -39,7 +43,8 @@ class Sim7000:
         'HEAD': 5
     }
     
-    def __init__(self, device, baudrate, rx_pin=16, tx_pin=17):
+    def __init__(self, device, baudrate, rx_pin=16, tx_pin=17, apn=None):
+        self.apn = apn
         self.uart = UART(device, baudrate, rx=rx_pin, tx=tx_pin, bits=8, parity=None, stop=1, timeout=1000)
         sleep(2)
         self.uart.sendbreak()
@@ -108,6 +113,7 @@ class Sim7000:
         self.cmd('SAPBR=3,{},"{}","{}"'.format(cid, param_name, param_value))     
     
     def ping(self):
+        ''' check if device is alive '''
         try:
             self.uart.write('AT\r')
             while True:
@@ -118,8 +124,6 @@ class Sim7000:
                 print('<---' + l)
                 if l.startswith('OK'):
                     return True
-                #if not l:
-                #    return False
         except:
             return False
         
@@ -132,28 +136,35 @@ class Sim7000:
         except SimError:
             return None
         
+    def is_gprs_active(self):
+        r = self.query('CGATT?')
+        return r[0] == 1
+    
+    def get_network_apn(self):
+        ''' Query APN delivered by the network '''
+        r = self.query('CGNAPN')
+        return r[1] if r[0] == 1 else None 
+
+    def get_network_info(self):
+        return self.query('COPS?')
+    
+    def is_network_active(self):
+        return self.query('CNACT?')[0] == 1
+    
+    def get_network_ip(self):
+        return self.query('CNACT?')[1]
+      
+        
     def init_network(self):
         print(self.cmd('CMEE=2')) # Use verbose error codes
-        #print(self.cmd('COPS?'))  # Query Network information, operator and network mode
-        #print(self.cmd('SAPBR=?'))
-        #print(self.cmd('SAPBR=3,1,"APN","tfdata"')) # Specific for StraightTalk/ATT
-        bs = self.get_bearer_status()
-        if bs != 1:
-            self.open_bearer()
-            self.set_bearer_param(param_name="APN", param_value="tfdata")
         
-        print("PIN Status: " + self.get_pin_status())
+        if self.apn:
+            print(self.cmd('SAPBR=3,1,"APN","{}"'.format(self.apn))) # network-specific setting
         
-        print(self.cmd('CGDCONT=1,"IP",""')) # Configure APN for registration when needed
-        print(self.cmd('CGNAPN')) # Query the APN delivered by the network after the CAT-M or NB-IOT network is successfully registered.
+        self.cmd('CGDCONT=1,"IP",""') # Configure APN for registration when needed
         
-        r = self.cmd('CNACT?')
-        status, ip_addr = self._parse_result(r[0])
-        print("Network status: ", status)
-        if int(status) == 0: 
+        if not self.is_network_active():
             print(self.cmd('CNACT=1')) #Activate network
-            sleep(5)
-            r = self.cmd('CNACT?')    
     
     def reset(self):
         self.cmd('CFUN=6')
@@ -169,20 +180,19 @@ class Sim7000:
         self.cmd('HTTPPARA="CID",1')
         self.cmd('HTTPPARA="URL","{}"'.format(url))
         self.cmd('HTTPACTION=0')
-        #self.cmd('HTTPSTATUS=?')
+
         method, status, response_len = self.wait_for('HTTPACTION')
-        #self.cmd('HTTPSTATUS=?')
         self.cmd('HTTPREAD=0,{}'.format(response_len))
         self.cmd('HTTPTERM')
     
     
-    def download_cert(self):
-        f=open('cacerts/Amazon_Root_CA_1.crt', 'r')
+    def download_cert(self, file_name):
+        f=open('cacerts/{}'.format(file_name), 'r')
         cert = f.read()
         size = len(cert)
         f.close()
         self.cmd('CFSINIT')
-        self.uart.write('AT+CFSWFILE=3,"Amazon_Root_CA_1.crt",0,{},1000\r'.format(size)) # 3-file system, 1000 - timeout (ms)
+        self.uart.write('AT+CFSWFILE=3,"{}",0,{},1000\r'.format(file_name, size)) # 3-file system, 1000 - timeout (ms)
         print("download command sent, waiting for confirm")
         while True:
             buf = self.uart.readline()
@@ -200,21 +210,23 @@ class Sim7000:
         print("Wrote {} bytes".format(bytes_written))
         self.uart.write('\r')
         self.cmd('CFSTERM')
-        self.cmd('CSSLCFG="convert",2,"Amazon_Root_CA_1.crt"')
+        self.cmd('CSSLCFG="convert",2,"{}"'.format(file_name)) 
         
     
     def _get_host(self, url):
         return url.split('/')[2]
 
-    def http(self, url, method='GET', body=None, headers={}):
+    def http(self, url, method='GET', body=None, headers={}, root_ca_cert=None):
         
         if self.query('SHSTATE?')[0] != 0: # Terminate previous connection if open
             self.cmd('SHDISC')
         
         if url.startswith('https:'):
             self.cmd('CSSLCFG="sslversion",1,3')
-            #self.cmd('SHSSL=1,"Amazon_Root_CA_1.crt"')
-            self.cmd('SHSSL=1,""') # !!! Need to set empty cert as #1 in order to skip cert validation!!
+            if root_ca_cert:
+                self.cmd('SHSSL=1,"{}"'.format(root_ca_cert))
+            else:
+                self.cmd('SHSSL=1,""') # !!! Need to set empty cert as #1 in order to skip cert validation!!
 
         host = self._get_host(url)
         # Mandatory params:
@@ -267,4 +279,8 @@ class Sim7000:
         self.cmd('SHDISC')
         gc.collect()
         return resp
+    
+    def ip_ping(self, addr, count=1, packetsize=64, interval=1000):
+        return self.cmd('SNPING4="{}",{},{},{}'.format(addr, count, packetsize, interval))
+        
 
