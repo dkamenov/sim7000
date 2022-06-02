@@ -1,5 +1,5 @@
 from machine import UART
-from time import sleep
+from time import sleep, mktime
 import re
 import gc
 import json
@@ -31,6 +31,51 @@ class HttpResponse:
     def json(self):
         return json.loads(self.content.decode('utf-8'))
 
+
+class GnssFix:
+    def __init__(self,
+                timestamp=None,
+                lat=None,
+                lat_hemisphere=None,
+                lon=None,
+                lon_hemisphere=None,
+                quality=None,
+                num_satelites=None,
+                hdop=None,
+                alt_geoid_height=None,
+                alt_unit=None,
+                geoidal_separation=None,
+                geoidal_separation_unit=None,
+                diff_data_age=None,
+                diff_ref_station_id=None,):
+
+        (self.timestamp,
+        self.lat,
+        self.lat_hemisphere,
+        self.lon,
+        self.lon_hemisphere,
+        self.quality,
+        self.num_satelites,
+        self.hdop,
+        self.alt_geoid_height,
+        self.alt_unit,
+        self.geoidal_separation,
+        self.geoidal_separation_unit,
+        self.diff_data_age,
+        self.diff_ref_station_id,) = (timestamp,
+        lat,
+        lat_hemisphere,
+        lon,
+        lon_hemisphere,
+        quality,
+        num_satelites,
+        hdop,
+        alt_geoid_height,
+        alt_unit,
+        geoidal_separation,
+        geoidal_separation_unit,
+        diff_data_age,
+        diff_ref_station_id,)
 
 
 class Sim7000:
@@ -78,7 +123,7 @@ class Sim7000:
         
     def _parse_result(self, l):
         str_vals = l.split(':')[1].split(',')
-        return [eval(x.strip()) for x in str_vals]
+        return [eval(x.strip()) if x else None for x in str_vals]
     
     def wait_for(self, cmd):
         ''' Waits for response from cmd and returns parsed result '''
@@ -168,24 +213,7 @@ class Sim7000:
     
     def reset(self):
         self.cmd('CFUN=6')
-    
-    def http_get(self, url):
-        ''' Deprecated - use http() below ''' 
-        try:
-            print(self.cmd('HTTPTERM'))
-        except:
-            print('exception clearing HTTP state')
         
-        self.cmd('HTTPINIT')
-        self.cmd('HTTPPARA="CID",1')
-        self.cmd('HTTPPARA="URL","{}"'.format(url))
-        self.cmd('HTTPACTION=0')
-
-        method, status, response_len = self.wait_for('HTTPACTION')
-        self.cmd('HTTPREAD=0,{}'.format(response_len))
-        self.cmd('HTTPTERM')
-    
-    
     def download_cert(self, file_name):
         f=open('cacerts/{}'.format(file_name), 'r')
         cert = f.read()
@@ -282,5 +310,92 @@ class Sim7000:
     
     def ip_ping(self, addr, count=1, packetsize=64, interval=1000):
         return self.cmd('SNPING4="{}",{},{},{}'.format(addr, count, packetsize, interval))
+    
+    def gnss_enable(self, setting):
+        self.cmd('CGNSPWR={}'.format(1 if setting else 0))
+    
+    def _gnss_date_to_time(self, datestr):
+        ''' convert a string in GNSS format (yyyyMMddhhmmss.sss) to a native MicroPython time, ignoring milliseconds '''
+        if len(datestr) != 18 or datestr[14] != '.':
+            return None
         
+        year = int(datestr[0:4])
+        month = int(datestr[4:6])
+        day = int(datestr[6:8])
+        hour = int(datestr[8:10])
+        minutes = int(datestr[10:12])
+        seconds = int(datestr[12:14])
+        return mktime((year, month, day, hour, minutes, seconds, None, None))
+    
+    def get_gnss_fix(self):
+        fix = None
+        self.cmd('CGNSTST=1,1')
+        while True:
+            gc.collect()
+            line = self.uart.readline()
+            if not line:
+                break
+            line = line.decode('utf-8')
+            print('<---{}'.format(line).strip())
+            if line.startswith('$GNGGA'):
+                fields = line.split('*')[0].split(',')
+                if int(fields[6]) == 0: # No fix could be obtained
+                    break; 
+                fix = GnssFix(
+                    timestamp=fields[1],
+                    lat = float(fields[2]),
+                    lat_hemisphere = fields[3],
+                    lon = float(fields[4]),
+                    lon_hemisphere = fields[5],
+                    quality = int(fields[6]),
+                    num_satelites = int(fields[7]),
+                    hdop = float(fields[8]),
+                    alt_geoid_height = float(fields[9]),
+                    alt_unit = fields[10],
+                    geoidal_separation = float(fields[11]),
+                    geoidal_separation_unit = fields[12],
+                    diff_data_age = fields[13],
+                    diff_ref_station_id = fields[14],
+                                
+                    )
+                
+        return fix
+    
+    def get_imei(self):
+        self.uart.write('AT+GSN\r')
+        imei = None
+        while True:
+            gc.collect()
+            line = self.uart.readline()
+            if line == None:
+                break
+            
+            l = line.decode('utf-8').strip()
+            print('<---{}'.format(l))
+            if l.startswith('AT+GSN') or l == '':
+                continue
+            if l.startswith('OK'):
+                return imei
+            imei = l
+            
+    def get_gsm_time_utc(self):
+        '''
+        format is "yy/MM/dd,hh:mm:ss±zz", where characters indicate
+        year (two last digits),month, day, hour, minutes, seconds and time zone
+        (indicates the difference, expressed in quarters of an hour, between the
+        local time and GMT; range -47...+48). E.g. 6th of May 2010, 00:01:52
+        GMT+2 hours equals to "10/05/06,00:01:52+08".
+        '''
+        resp = self.cmd('CCLK?')
+        if len(resp) != 1 or not resp[0].startswith('+CCLK:') or '"' not in resp[0]:
+            return None
+        datestr = resp[0].split('"')[1]
+        year = 2000 + int(datestr[0:2])
+        month = int(datestr[3:5])
+        day = int(datestr[6:8])
+        hour = int(datestr[9:11])
+        minutes = int(datestr[12:14])
+        seconds = int(datestr[15:17])
+        tz_q = int(datestr[17:20])
+        return mktime((year, month, day, hour, minutes, seconds, None, None)) - tz_q * 15 * 60
 
