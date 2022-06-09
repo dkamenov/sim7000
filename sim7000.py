@@ -4,6 +4,8 @@ import re
 import gc
 import json
 
+from util import safe_int, safe_float
+
 class IllegalArgumentException(Exception):
     pass
 
@@ -16,6 +18,8 @@ class CmeError(Exception):
 class CmsError(Exception):
     pass
 
+class ValidationError(Exception):
+    pass
 
 class HttpResponse:
     
@@ -33,50 +37,73 @@ class HttpResponse:
 
 
 class GnssFix:
-    def __init__(self,
-                timestamp=None,
-                lat=None,
-                lat_hemisphere=None,
-                lon=None,
-                lon_hemisphere=None,
-                quality=None,
-                num_satelites=None,
-                hdop=None,
-                alt_geoid_height=None,
-                alt_unit=None,
-                geoidal_separation=None,
-                geoidal_separation_unit=None,
-                diff_data_age=None,
-                diff_ref_station_id=None,):
-
-        (self.timestamp,
-        self.lat,
-        self.lat_hemisphere,
-        self.lon,
-        self.lon_hemisphere,
-        self.quality,
-        self.num_satelites,
-        self.hdop,
-        self.alt_geoid_height,
-        self.alt_unit,
-        self.geoidal_separation,
-        self.geoidal_separation_unit,
-        self.diff_data_age,
-        self.diff_ref_station_id,) = (timestamp,
-        lat,
-        lat_hemisphere,
-        lon,
-        lon_hemisphere,
-        quality,
-        num_satelites,
-        hdop,
-        alt_geoid_height,
-        alt_unit,
-        geoidal_separation,
-        geoidal_separation_unit,
-        diff_data_age,
-        diff_ref_station_id,)
-
+    def __init__(self):
+        self.gnss_run_status = None #1 GNSS run status
+        self.fix_status = None      #2 Fix status -- 0-1 1
+        self.utc_datetime = None    #3 UTC date & Time
+        self.lat = None             #4 Latitude ±dd.dddddd [-90.000000,90.000000] 10
+        self.lon = None             #5 Longitude ±ddd.dddddd [-180.000000,180.000000] 11
+        self.altitude = None         #6 MSL Altitude meters
+        self.speed_over_ground = None          #7 Speed Over Ground Km/hour [0,999.99] 6
+        self.course_over_ground = None #8 Course Over Ground degrees [0,360.00] 6
+        self.fix_mode = None #9 Fix Mode -- 0,1,2 [1] 1
+        #self.reserved1 = None #10 Reserved1 
+        self.hdop = None #11 HDOP -- [0,99.9] 4 (Horizontal Dilution of Precision)
+        self.pdop = None #12 PDOP -- [0,99.9] 4 (Position Dilution of Precision)
+        self.vdop = None #13 VDOP -- [0,99.9] 4 (Vertical Dilution of Precision)
+        #14 Reserved2
+        self.gps_sats_in_view = None  #15 GPS Satellites in View -- [0,99] 2
+        self.gnss_sats_used = None #16 GNSS Satellites Used -- [0,99] 2
+        self.glonass_sats_in_view = None #17 GLONASS Satellites in View -- [0,99] 2
+        #18 Reserved3 
+        self.cn0_max = None #19 C/N0 max dBHz [0,55] 
+        self.hpa = None #20 HPA [2] meters [0,9999.9] (Horizontal Position Accuracy)
+        self.vpa = None #21 VPA [2] meters [0,9999.9] (Vertical Position Accuracy)
+    
+    def _gnss_date_to_time(datestr):
+        ''' convert a string in GNSS format (yyyyMMddhhmmss.sss) to a native MicroPython time, ignoring milliseconds '''
+        if len(datestr) != 18 or datestr[14] != '.':
+            return None
+        
+        year = int(datestr[0:4])
+        month = int(datestr[4:6])
+        day = int(datestr[6:8])
+        hour = int(datestr[8:10])
+        minutes = int(datestr[10:12])
+        seconds = int(datestr[12:14])
+        return mktime((year, month, day, hour, minutes, seconds, None, None))
+    
+    def fromCSV(data):
+        if not data.startswith('+CGNSINF'):
+            raise ValidationError('Incorrect prefix')
+        fields = data[9:].strip().split(',')
+        
+        if not safe_int(fields[0]) or not safe_int(fields[1]): # No GNSS run or no fix
+            return None
+        
+        f = GnssFix()
+        f.gnss_run_status = safe_int(fields[0]) #1 GNSS run status
+        f.fix_status = safe_int(fields[1])      #2 Fix status -- 0-1 1
+        f.utc_datetime = GnssFix._gnss_date_to_time(fields[2])    #3 UTC date & Time
+        f.lat = safe_float(fields[3])             #4 Latitude ±dd.dddddd [-90.000000,90.000000] 10
+        f.lon = safe_float(fields[4])             #5 Longitude ±ddd.dddddd [-180.000000,180.000000] 11
+        f.altitude = safe_float(fields[5])         #6 MSL Altitude meters
+        f.speed_over_ground = safe_float(fields[6])          #7 Speed Over Ground Km/hour [0,999.99] 6
+        f.course_over_ground = safe_float(fields[7]) #8 Course Over Ground degrees [0,360.00] 6
+        f.fix_mode = safe_int(fields[8]) #9 Fix Mode -- 0,1,2 [1] 1
+        #10 Reserved1 
+        f.hdop = safe_float(fields[10]) #11 HDOP -- [0,99.9] 4
+        f.pdop = safe_float(fields[11]) #12 PDOP -- [0,99.9] 4
+        f.vdop = safe_float(fields[12]) #13 VDOP -- [0,99.9] 4
+         #14 Reserved2
+        f.gps_sats_in_view = safe_int(fields[14]) #15 GPS Satellites in View -- [0,99] 2
+        f.gnss_sats_used = safe_int(fields[15])   #16 GNSS Satellites Used -- [0,99] 2
+        f.glonass_sats_in_view = safe_int(fields[16])  #17 GLONASS Satellites in View -- [0,99] 2
+        #18 Reserved3 
+        f.cn0_max = safe_int(fields[18])  #19 C/N0 max dBHz [0,55] 
+        f.hpa = safe_float(fields[19])  #20 HPA [2] meters [0,9999.9] 
+        f.vpa = safe_float(fields[20])  #21 VPA [2] meters [0,9999.9]
+        return f
 
 class Sim7000:
     
@@ -88,17 +115,20 @@ class Sim7000:
         'HEAD': 5
     }
     
-    def __init__(self, device, baudrate, rx_pin=16, tx_pin=17, apn=None):
+    def __init__(self, device, baudrate, rx_pin, tx_pin, apn=None):
         self.apn = apn
         self.uart = UART(device, baudrate, rx=rx_pin, tx=tx_pin, bits=8, parity=None, stop=1, timeout=1000)
-        sleep(2)
+        sleep(1)
         self.uart.sendbreak()
         sleep(0.2)        
+    
+    def _normalize_command(self, cmd):
+        return ('AT+' if not cmd.startswith('AT') else '') + cmd + '\r'
     
     def cmd(self, cmd):
         result = []
         cmd_prefix=re.match(r'^[A-Z]+', cmd).group(0)
-        self.uart.write('AT+' + cmd + '\r')
+        self.uart.write(self._normalize_command(cmd))
         while True:
             buf = self.uart.readline()
             if not buf:
@@ -120,6 +150,7 @@ class Sim7000:
         r = self.cmd(cmd)
         results = self._parse_result(r[0]) ## TODO: is this the correct response line? - check if command matches
         return results
+
         
     def _parse_result(self, l):
         str_vals = l.split(':')[1].split(',')
@@ -201,10 +232,10 @@ class Sim7000:
       
         
     def init_network(self):
-        print(self.cmd('CMEE=2')) # Use verbose error codes
+        self.cmd('CMEE=2') # Use verbose error codes
         
         if self.apn:
-            print(self.cmd('SAPBR=3,1,"APN","{}"'.format(self.apn))) # network-specific setting
+            self.cmd('SAPBR=3,1,"APN","{}"'.format(self.apn)) # Access Point Name (network-specific setting)
         
         self.cmd('CGDCONT=1,"IP",""') # Configure APN for registration when needed
         
@@ -212,9 +243,11 @@ class Sim7000:
             print(self.cmd('CNACT=1')) #Activate network
     
     def reset(self):
+        ''' soft-reset sim7000 board '''
         self.cmd('CFUN=6')
         
     def download_cert(self, file_name):
+        ''' Download root CA certificate to device in order to use for HTTPS certificate verification '''
         f=open('cacerts/{}'.format(file_name), 'r')
         cert = f.read()
         size = len(cert)
@@ -293,7 +326,7 @@ class Sim7000:
                         print('<---{}'.format(line))
                         continue
                     bytes_to_read = self._parse_result(line)[0]
-                    print("---------------reading {}b -----------".format(bytes_to_read))
+                    print("--------------- reading {}b -----------".format(bytes_to_read))
                     buf = self.uart.read(bytes_to_read)
                     resp.content += buf
                     print("--------------- {} of {}b read so far -----------".format(len(buf), len(resp.content)))
@@ -311,74 +344,57 @@ class Sim7000:
     def ip_ping(self, addr, count=1, packetsize=64, interval=1000):
         return self.cmd('SNPING4="{}",{},{},{}'.format(addr, count, packetsize, interval))
     
-    def gnss_enable(self, setting):
+    def gnss_enable(self, setting=True):
+        ''' Turn GNSS chip on/off
+            setting - True / False
+        '''
         self.cmd('CGNSPWR={}'.format(1 if setting else 0))
-    
-    def _gnss_date_to_time(self, datestr):
-        ''' convert a string in GNSS format (yyyyMMddhhmmss.sss) to a native MicroPython time, ignoring milliseconds '''
-        if len(datestr) != 18 or datestr[14] != '.':
-            return None
         
-        year = int(datestr[0:4])
-        month = int(datestr[4:6])
-        day = int(datestr[6:8])
-        hour = int(datestr[8:10])
-        minutes = int(datestr[10:12])
-        seconds = int(datestr[12:14])
-        return mktime((year, month, day, hour, minutes, seconds, None, None))
+    def is_gnss_on(self):
+        ''' Check if GNSS is powered on '''
+        return self.query('CGNSPWR?')[0] == 1
     
     def get_gnss_fix(self):
-        fix = None
-        self.cmd('CGNSTST=1,1')
-        while True:
-            gc.collect()
-            line = self.uart.readline()
-            if not line:
-                break
-            line = line.decode('utf-8')
-            print('<---{}'.format(line).strip())
-            if line.startswith('$GNGGA'):
-                fields = line.split('*')[0].split(',')
-                if int(fields[6]) == 0: # No fix could be obtained
-                    break; 
-                fix = GnssFix(
-                    timestamp=fields[1],
-                    lat = float(fields[2]),
-                    lat_hemisphere = fields[3],
-                    lon = float(fields[4]),
-                    lon_hemisphere = fields[5],
-                    quality = int(fields[6]),
-                    num_satelites = int(fields[7]),
-                    hdop = float(fields[8]),
-                    alt_geoid_height = float(fields[9]),
-                    alt_unit = fields[10],
-                    geoidal_separation = float(fields[11]),
-                    geoidal_separation_unit = fields[12],
-                    diff_data_age = fields[13],
-                    diff_ref_station_id = fields[14],
-                                
-                    )
-                
-        return fix
+        response = self.cmd('CGNSINF')
+        return GnssFix.fromCSV(response[0]) if response else None
     
-    def get_imei(self):
-        self.uart.write('AT+GSN\r')
-        imei = None
+    def cmd_collect(self, cmd):
+        cmd = self._normalize_command(cmd)
+        self.uart.write(cmd)
+        output = []
         while True:
-            gc.collect()
             line = self.uart.readline()
             if line == None:
-                break
-            
+                continue   
             l = line.decode('utf-8').strip()
             print('<---{}'.format(l))
-            if l.startswith('AT+GSN') or l == '':
+            if not l or l.startswith(cmd.strip()):
                 continue
-            if l.startswith('OK'):
-                return imei
-            imei = l
-            
+            if line.startswith('OK'):
+                return output
+            output.append(l)
+        
+    def get_imei(self):
+        ''' Request Terminal Adapter (TA) serial number identification (IMEI) '''
+        return self.cmd_collect('GSN')[0]
+    
+    def get_iccid(self):
+        ''' Request device ICC ID '''
+        return self.cmd_collect('CCID')[0]
+    
+    def get_flash_device_type(self):
+        ''' Request Terminal Adapter (TA) serial number identification (IMEI) '''
+        return self.cmd_collect('CDEVICE?')
+    
+    def get_product_info(self):
+        ''' Display Product Identification Information '''
+        return self.cmd_collect('GSV')
+    
     def get_gsm_time_utc(self):
+        ''' time from local clock synchronized from network - may fail if no wireless connection '''
+        resp = self.cmd('CCLK?')
+        if len(resp) != 1 or not resp[0].startswith('+CCLK:') or '"' not in resp[0]:
+            return None
         '''
         format is "yy/MM/dd,hh:mm:ss±zz", where characters indicate
         year (two last digits),month, day, hour, minutes, seconds and time zone
@@ -386,9 +402,6 @@ class Sim7000:
         local time and GMT; range -47...+48). E.g. 6th of May 2010, 00:01:52
         GMT+2 hours equals to "10/05/06,00:01:52+08".
         '''
-        resp = self.cmd('CCLK?')
-        if len(resp) != 1 or not resp[0].startswith('+CCLK:') or '"' not in resp[0]:
-            return None
         datestr = resp[0].split('"')[1]
         year = 2000 + int(datestr[0:2])
         month = int(datestr[3:5])
