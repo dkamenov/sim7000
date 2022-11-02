@@ -4,7 +4,13 @@ import re
 import gc
 import json
 
-from util import safe_int, safe_float
+def _safe_float(val):
+    s = val.strip()
+    return float(s) if s else None
+
+def _safe_int(val):
+    s = val.strip()
+    return int(s) if s else None
 
 class IllegalArgumentException(Exception):
     pass
@@ -78,32 +84,34 @@ class GnssFix:
             raise ValidationError('Incorrect prefix')
         fields = data[9:].strip().split(',')
         
-        if not safe_int(fields[0]) or not safe_int(fields[1]): # No GNSS run or no fix
+        if not _safe_int(fields[0]) or not _safe_int(fields[1]): # No GNSS run or no fix
             return None
         
         f = GnssFix()
-        f.gnss_run_status = safe_int(fields[0]) #1 GNSS run status
-        f.fix_status = safe_int(fields[1])      #2 Fix status -- 0-1 1
+        f.gnss_run_status = _safe_int(fields[0]) #1 GNSS run status
+        f.fix_status = _safe_int(fields[1])      #2 Fix status -- 0-1 1
         f.utc_datetime = GnssFix._gnss_date_to_time(fields[2])    #3 UTC date & Time
-        f.lat = safe_float(fields[3])             #4 Latitude ±dd.dddddd [-90.000000,90.000000] 10
-        f.lon = safe_float(fields[4])             #5 Longitude ±ddd.dddddd [-180.000000,180.000000] 11
-        f.altitude = safe_float(fields[5])         #6 MSL Altitude meters
-        f.speed_over_ground = safe_float(fields[6])          #7 Speed Over Ground Km/hour [0,999.99] 6
-        f.course_over_ground = safe_float(fields[7]) #8 Course Over Ground degrees [0,360.00] 6
-        f.fix_mode = safe_int(fields[8]) #9 Fix Mode -- 0,1,2 [1] 1
+        f.lat = _safe_float(fields[3])             #4 Latitude ±dd.dddddd [-90.000000,90.000000] 10
+        f.lon = _safe_float(fields[4])             #5 Longitude ±ddd.dddddd [-180.000000,180.000000] 11
+        f.altitude = _safe_float(fields[5])         #6 MSL Altitude meters
+        f.speed_over_ground = _safe_float(fields[6])          #7 Speed Over Ground Km/hour [0,999.99] 6
+        f.course_over_ground = _safe_float(fields[7]) #8 Course Over Ground degrees [0,360.00] 6
+        f.fix_mode = _safe_int(fields[8]) #9 Fix Mode -- 0,1,2 [1] 1
         #10 Reserved1 
-        f.hdop = safe_float(fields[10]) #11 HDOP -- [0,99.9] 4
-        f.pdop = safe_float(fields[11]) #12 PDOP -- [0,99.9] 4
-        f.vdop = safe_float(fields[12]) #13 VDOP -- [0,99.9] 4
+        f.hdop = _safe_float(fields[10]) #11 HDOP -- [0,99.9] 4
+        f.pdop = _safe_float(fields[11]) #12 PDOP -- [0,99.9] 4
+        f.vdop = _safe_float(fields[12]) #13 VDOP -- [0,99.9] 4
          #14 Reserved2
-        f.gps_sats_in_view = safe_int(fields[14]) #15 GPS Satellites in View -- [0,99] 2
-        f.gnss_sats_used = safe_int(fields[15])   #16 GNSS Satellites Used -- [0,99] 2
-        f.glonass_sats_in_view = safe_int(fields[16])  #17 GLONASS Satellites in View -- [0,99] 2
+        f.gps_sats_in_view = _safe_int(fields[14]) #15 GPS Satellites in View -- [0,99] 2
+        f.gnss_sats_used = _safe_int(fields[15])   #16 GNSS Satellites Used -- [0,99] 2
+        f.glonass_sats_in_view = _safe_int(fields[16])  #17 GLONASS Satellites in View -- [0,99] 2
         #18 Reserved3 
-        f.cn0_max = safe_int(fields[18])  #19 C/N0 max dBHz [0,55] 
-        f.hpa = safe_float(fields[19])  #20 HPA [2] meters [0,9999.9] 
-        f.vpa = safe_float(fields[20])  #21 VPA [2] meters [0,9999.9]
+        f.cn0_max = _safe_int(fields[18])  #19 C/N0 max dBHz [0,55] 
+        f.hpa = _safe_float(fields[19])  #20 HPA [2] meters [0,9999.9] 
+        f.vpa = _safe_float(fields[20])  #21 VPA [2] meters [0,9999.9]
         return f
+
+
 
 class Sim7000:
     
